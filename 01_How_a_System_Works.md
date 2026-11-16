@@ -2,7 +2,7 @@
 
 ## 1. What Is in an SoC
 
-待學習。
+開始學習
 
 ## 2. Buses and Transactions
 
