@@ -93,6 +93,86 @@ SoC 的元件分工 → Interconnect 連接 → Memory Map 配置 → Address de
 
 ## 2. Buses and Transactions
 
+### Bus & Transaction
+
+* **Bus**：元件間的通訊介面，包含訊號與使用規則（Protocol）。
+* **Transaction**：從請求到回應的一次完整讀取或寫入。
+* **Manager / Master**：發起交易；**Subordinate / Slave**：接收請求並回應。
+* 角色依介面行為決定：CPU 設定 DMA 時，DMA 是 Slave；DMA 主動讀取 SRAM 時，DMA 是 Master。
+
+### AXI Channels
+
+![AXI 五個通道與方向](https://raw.githubusercontent.com/ray13542/soc_note/main/assets/unit01/axi_channels.png)
+
+| 操作 | Channel | 方向 | 內容 |
+| --- | --- | --- | --- |
+| Write | AW | Master → Slave | Write address |
+| Write | W | Master → Slave | Write data、WSTRB |
+| Write | B | Slave → Master | Write response（BRESP） |
+| Read | AR | Master → Slave | Read address |
+| Read | R | Slave → Master | Read data、Read response（RRESP） |
+
+**讀取用 AR、R；寫入用 AW、W、B。** 讀取不使用 B。
+
+WSTRB 指定哪些 byte 要寫入；五通道是 AXI 的設計，不是所有 bus 的共同規定。
+
+### VALID / READY Handshake
+
+* 發送方控制 VALID：資訊有效。
+* 接收方控制 READY：可以接收。
+* **上升緣取樣到 VALID = 1 且 READY = 1，才完成一次傳送。**
+* 尚未握手時，必須保持 VALID 與該通道的 payload 不變。例如 WDATA、WSTRB，或 B 通道的 BRESP。
+* 接收方暫時不接收，讓發送方等待，稱為 Backpressure。
+* 發送方不能等待 READY 才提出 VALID，避免雙方互等。
+
+### Why Separate Channels?
+
+**目的：各部分獨立準備與接收，減少不必要等待，支援緩衝與流水線。**
+
+例如位址先準備好，可以先接收位址，再等資料；接收方需保存已接收的資訊並記錄狀態。
+
+* AW、W 可以同一拍握手，也可以不同拍握手。
+* 簡單接收方可以等 AWVALID、WVALID 到齊再一起接收，但仍須遵守 AXI 握手規則。
+* **不能假設所有 AXI 元件都會讓 AW、W 同時握手。**
+* 通道獨立不代表沒有依賴：AXI4-Lite 的 B 回應必須在該筆 AW、W 都被接收之後產生。
+
+### Independent Completion
+
+![獨立握手與寫入回應時序](https://raw.githubusercontent.com/ray13542/soc_note/main/assets/unit01/axi_handshake.png)
+
+上圖是一筆 AXI4-Lite write，沒有下一筆交易：
+
+1. T1：AW 握手，位址已接收；W 未握手。
+2. T2：AWVALID 可降低；WVALID 與資料必須保持。
+3. T3：W 握手，資料被接收。
+4. T4：BVALID = 1、BREADY = 0，回應仍未被接收。
+5. T5：B 握手，Master 接收並檢查 BRESP；此例為 OKAY。
+
+**各通道完成後各自更新，不能等 W 握手才把 AWVALID、WVALID 一起降低。**
+
+若 AW 已完成卻繼續維持 AWVALID，且後續上升緣 AWREADY 仍為 1，就會再接受一筆 AW。只有真的要送下一筆位址，才能把這當成新的傳送。
+
+### Responses & Errors
+
+* AW / W 握手：代表位址／資料已被接收，不保證操作成功。
+* B 握手：Master 接收回應，還要檢查 BRESP 是成功或錯誤。
+* 找不到目標或目標無法處理時，也應回傳錯誤，避免發起方無限等待。
+* **BVALID = 1、BREADY = 0 時，Slave 必須維持 BVALID 與 BRESP。** 此時回應已提出，只是尚未被接收。
+
+### Quiz Review
+
+1. **角色判斷：正確。** CPU → DMA：CPU 是 Master；DMA → SRAM：DMA 是 Master。
+2. **讀取通道：需修正。** 回答的 AW、W 是寫入；正確是 AR 傳位址，R 回傳資料與狀態，不使用 B。
+3. **握手時序：正確。** T3 接收；T2 尚未握手，不能更換資料。
+4. **獨立判斷：方向正確。** 原設計在 AW 完成、W 尚未完成時撤掉 WVALID，會讓資料未被接收。改成等 W 才一起撤掉也不對，可能重複送出 AW；應各自判斷握手、各自更新 VALID。
+5. **回應：前兩項正確，原因補充。** 操作失敗要回傳 B 錯誤；BVALID 不能在未握手時撤掉。AW、W 只代表接收請求，是否成功要看接收到的 BRESP。
+
+### Source
+
+* [ChipVerify — Buses and Transactions](https://chipverify.com/soc-design/buses-and-transactions)
+* [Arm — AMBA AXI and ACE Protocol Specification（握手與通道依賴）](https://developer.arm.com/-/media/Arm%20Developer%20Community/PDF/IHI0022H_amba_axi_protocol_spec.pdf)
+* 圖片與時序範例為本筆記自行繪製；本節以 AXI4-Lite 單筆讀寫為主。
+
 ## 3. Latency and Bandwidth
 
 ## 4. Memory-Mapped I/O and Registers
