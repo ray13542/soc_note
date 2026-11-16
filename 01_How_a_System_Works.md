@@ -9,6 +9,8 @@
 3. 訂正後補充本單元筆記與圖片。
 4. 以 GitHub 保存最新版本，在 HackMD 使用 Pull from GitHub 取得更新。
 
+目前學習節奏：一次閱讀兩章，讀完共測驗 4 題，每章 2 題；訂正後一起更新筆記。
+
 ---
 
 ## 1. What Is in an SoC
@@ -175,7 +177,157 @@ WSTRB 指定哪些 byte 要寫入；五通道是 AXI 的設計，不是所有 bu
 
 ## 3. Latency and Bandwidth
 
+### Introduction
+
+| 名稱 | 意義 | 單位 |
+| --- | --- | --- |
+| Latency | 一次請求從發出到取得結果的時間 | cycles、ns |
+| Bandwidth | 單位時間能搬移的資料量 | Bytes/s、MB/s、GB/s |
+
+**一筆等多久，與每秒搬多少，是不同問題。** 比較 latency 時，不能只比較 cycle 數，還要看 clock frequency。
+
+### Calculation
+
+```text
+Clock period = 1 / Clock frequency
+Latency = cycles × Clock period
+```
+
+測驗範例：100 MHz、每次讀 4 Bytes、每次需 5 cycles。
+
+```text
+Clock period = 10 ns
+Latency = 5 × 10 ns = 50 ns
+
+一次只允許一筆交易，完成後立即發出下一筆，忽略額外空檔：
+Bandwidth = 4 Bytes / 50 ns
+          = 80,000,000 Bytes/s = 80 MB/s
+```
+
+> 此處 1 MB = 1,000,000 Bytes；1 Byte = 8 bits。上述 bandwidth 公式有「不能重疊交易」的前提。
+
+### Overlap & Burst
+
+![延遲與交易重疊](https://raw.githubusercontent.com/ray13542/soc_note/main/assets/unit01/latency_overlap.png)
+
+* **Outstanding transaction**：已發出、尚未完成的交易。
+* 多筆獨立交易可重疊等待，單筆 latency 不變，整體 bandwidth 仍可能增加。
+* 前提：請求彼此獨立，且發送方、接收方與路徑均支援所需吞吐量。
+* **Burst**：一筆位址請求搭配多筆資料傳送，分攤位址與控制開銷。
+* **Peak bandwidth** 是理想能力；實際達成值受等待、競爭與軟體行為影響。
+
+### Find the Bottleneck
+
+| 類型 | 現象 | 改善方向 |
+| --- | --- | --- |
+| Latency-bound | 等待單筆資料才能繼續 | 降低延遲；可獨立的請求才適合重疊 |
+| Bandwidth-bound | 路徑持續忙碌，資料仍搬不完 | 增加傳輸能力或減少資料量 |
+| Device-bound | 終端裝置比前面的路徑慢 | 改善裝置速度，或讓 CPU 等待時做別的工作 |
+
+若下一筆位址依賴上一筆資料，每次只讀 4 Bytes，則 bus 從 32-bit 加寬至 64-bit、但 latency 不變，不能保證加速。
+
+### Quiz Review
+
+1. **Latency 與公式正確**：回答 50 ns、4 B / 50 ns。補上題目要求的換算結果：**80 MB/s**。
+2. **瓶頸判斷正確**：Latency-bound，不一定快兩倍。原因是請求有資料依賴，且每次需要的資料量與等待時間沒有改變。
+
+### Source
+
+* [ChipVerify — Latency and Bandwidth](https://chipverify.com/soc-design/latency-and-bandwidth)
+* 計算與圖解為自訂教學範例，不代表特定硬體的量測結果。
+
 ## 4. Memory-Mapped I/O and Registers
+
+### MMIO & Register Map
+
+**MMIO (Memory-Mapped I/O)**：將周邊暫存器配置到位址空間，CPU 用 load / store 操作。
+
+* Device register 位於周邊內，不是 CPU 的通用暫存器。
+* Memory Map 定義各元件的位址範圍。
+* Register Map 定義元件內每個 register 的 offset、bit fields、access type、reset value 與副作用。
+
+```text
+Register address = Base address + Offset
+```
+
+本章自訂 UART 範例（位址與欄位依設計而異）：
+
+| Base | Offset | Register | 用途 |
+| --- | --- | --- | --- |
+| 0x5000_0000 | 0x00 | CTRL | 控制設定 |
+| 0x5000_0000 | 0x04 | STATUS | 狀態；完整位址 0x5000_0004 |
+| 0x5000_0000 | 0x08 | TXDATA | 寫入待傳送資料 |
+
+### Bit Fields & Ownership
+
+本例 STATUS：bit 0 = FULL、bit 1 = BUSY，兩者都是 RO。
+
+* FULL = 1：傳送 FIFO 已滿。
+* BUSY = 1：仍有資料等待傳送或正在傳送。
+* **STATUS = 0b10：還能加入資料，但尚未全部傳完。**
+
+```c
+full = status & 0x1;
+busy = (status >> 1) & 0x1;
+```
+
+**軟體透過 CPU 執行存取，所以軟體與 CPU 通常不是兩個獨立的寫入來源。**
+
+| 欄位或暫存器 | 誰影響它 | CPU 的操作 |
+| --- | --- | --- |
+| CTRL.ENABLE | 軟體經 CPU 設定 | 寫入以啟用功能 |
+| STATUS.FULL | FIFO 控制邏輯 | 讀取，不能寫 0 來騰出空間 |
+| STATUS.BUSY | UART 傳送控制邏輯 | 讀取工作狀態 |
+| TXDATA | 軟體提供資料，硬體接收 | 寫入待傳送資料 |
+
+同一個 register 的不同欄位可以有不同權限。某些狀態不需獨立 flip-flop，例如 FULL 可以由「資料數量 == FIFO 容量」產生。
+
+### Access Types & Side Effects
+
+| 類型 | 軟體操作規則 |
+| --- | --- |
+| RO | 只能讀；寫入的處理依規格 |
+| WO | 只能寫；不能假設讀回最後寫入值 |
+| RW | 可讀可寫 |
+| W1C | 寫 1 清除對應 bit；寫 0 不清除 |
+
+**Side effect：一次存取除了傳遞數值，還觸發動作或改變裝置狀態。**
+
+![周邊暫存器存取的副作用](https://raw.githubusercontent.com/ray13542/soc_note/main/assets/unit01/register_side_effects.png)
+
+1. **寫 TXDATA → 加入佇列**：有空間時連寫兩個 C，會加入兩筆 C，不只是保留最後一個值。重複執行一次交易可能造成多送一個字元。
+2. **讀 RXDATA → 取出資料**：若規格定義讀取會 pop FIFO，第一次讀到 A 並移除 A，下一次就讀到 B。不能為了確認而隨意多讀。
+3. **寫 W1C → 清除事件**：硬體完成時把 DONE 設為 1；軟體處理後對該 bit 寫 1，DONE 清為 0。
+
+FULL / BUSY 通常描述當下狀態；DONE 事件旗標可以記住發生過的事件，直到軟體確認。不是所有讀取都有副作用，必須依 Register Map 判斷。
+
+> 若硬體設置與軟體清除同時發生，優先順序也必須由規格定義。
+
+### Software Access
+
+* **volatile**：讓編譯器依其 volatile 存取規則保留裝置存取，避免把輪詢簡化成只讀一次。實際平台可能提供專用 MMIO accessor。
+* volatile 不等於硬體 memory barrier，也不保證 atomicity。
+* 存取寬度、對齊、保留位元與操作順序都應依裝置規格。
+
+對一般 RW register 設定 bit 3：
+
+```c
+reg = reg | (1u << 3);
+```
+
+這是 **Read-Modify-Write**：讀舊值 → 修改 → 寫回整個值。若中間有中斷程式改動其他 bit，最後寫回可能覆蓋它的修改。
+
+專用 SET / CLEAR register 可讓軟體直接修改指定 bit，避免這類讀後寫回問題。不能把一般 RW 的操作方式直接套用到 W1C 等特殊欄位。
+
+### Quiz Review
+
+1. **位址與權限判斷正確**：STATUS = 0x5000_0004；0b10 表示有空間、仍忙碌，所以可以加入資料，但尚未全部傳送完成。CPU 不能直接改寫本例 RO 的 FULL / BUSY。
+2. **副作用判斷正確**：連讀兩次得到 A、B，FIFO 剩 C；對 DONE 寫 1 後清為 0（假設期間沒有其他硬體更新）。
+
+### Source
+
+* [ChipVerify — Memory-Mapped I/O and Registers](https://chipverify.com/soc-design/memory-mapped-io)
+* UART 位址、圖解與副作用情境為本次教學範例，實際存取行為應依各裝置規格。
 
 ## 5. Polling, Interrupts and DMA
 
