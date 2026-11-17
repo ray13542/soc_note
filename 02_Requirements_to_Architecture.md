@@ -215,8 +215,148 @@ Use Case → Requirement → 設計決定 → 驗證測試。資料量或期限�
 
 ## 4. Memory Maps and Address Decoding
 
-待學習。
+> 基礎概念參見[第一單元：What Is in an SoC 與 MMIO](https://github.com/ray13542/soc_note/blob/main/01_How_a_System_Works.md)。本章補充範圍、對齊、分層解碼、alias 與不同存取者的位址視角。
+
+### Range & Alignment
+
+Address space 是可表示的位址範圍，不等於實際裝設的記憶體容量。
+
+```text
+有效範圍：Base ≤ Address < Base + Size
+最後一個 byte 位址 = Base + Size − 1
+
+例：SRAM Base = 0x2000_0000，Size = 8 KiB = 0x2000 Bytes
+最後位址 = 0x2000_1FFF
+0x2000_2000 已超出範圍。
+```
+
+* 常見區域大小是 2 的次方，Base 依大小對齊，方便以高位元辨識區域、低位元作 offset。
+* 4 KiB = 2^12 Bytes；對齊的 4 KiB 區域可用低 12 bits 作內部 offset。
+* 這是簡化解碼的常見方式，不是所有系統都必須遵守的限制。
+* 保留擴充空間可降低未來改位址造成的軟體相容性問題。
+* Peripheral window 大小不等於實際儲存容量：4 KiB window 可能只放幾個 register。
+
+### Hierarchical Decoding & Aliases
+
+![分層位址解碼與別名](https://raw.githubusercontent.com/ray13542/soc_note/main/assets/unit02/address_decode_alias.png)
+
+分層解碼：Interconnect 選大區域 → Bridge 選周邊 → 周邊依 offset 選 register。每層只需處理自己的範圍與介面。
+
+自訂 partial decoding 範例：周邊只看 offset bit 2。
+
+| Offset | bit 2 | 目標 |
+| --- | --- | --- |
+| 0x00 | 0 | CTRL |
+| 0x04 | 1 | STATUS |
+| 0x08 | 0 | CTRL |
+| 0x0C | 1 | STATUS |
+
+**不同位址選到同一個位置，稱為 Address Alias。** Driver 即使把 CTRL offset 誤寫成 0x08，仍可能操作成功，掩蓋錯誤；新版增加 register 或改用完整解碼後才失效。
+
+* Alias 可以是刻意設計，例如 boot remapping；必須在規格中明確記錄。
+* 未使用位址要有規定的回應，不能無限等待。回錯誤時，CPU 是否進入 exception，取決於其架構與系統設計。
+* 測試需涵蓋範圍邊界、未使用 offset、重疊與非預期 alias。
+
+### Manager Views & Software
+
+CPU 與 DMA 可能有不同可達範圍，甚至同一儲存體對應不同位址。傳遞 buffer address 前，要確認可達性與位址轉換規則。
+
+Linker script 與 C header 必須跟硬體 map 一致；共同來源產生方式參見本單元第 3 章。
+
+### Key Takeaways
+
+* 邊界用 Base + Size − 1 計算，避免 off-by-one。
+* 對齊與分層解碼簡化硬體；window 不代表實際儲存容量。
+* Partial decoding 可能產生 alias，讓錯誤位址看起來可用。
+* CPU 可用的位址，不保證 DMA 可直接使用。
+* **關鍵字：Address Space、Base、Size、Alignment、Hierarchical Decoding、Partial Decoding、Alias、Remapping。**
+
+### Source
+
+* [ChipVerify — Memory Maps and Address Decoding](https://chipverify.com/soc-design/memory-maps-and-address-decoding)
+* SRAM 邊界、周邊位址與 alias 表格為自訂教學例子。
 
 ## 5. Boot ROM and the Boot Flow
 
-待學習。
+> 記憶體種類、TCM 配置與 reset 基礎參見[第一單元第 6、7 章](https://github.com/ray13542/soc_note/blob/main/01_How_a_System_Works.md)。本章聚焦啟動階段、C 執行環境、信任鏈與模擬測試的差異。
+
+### Reset Entry & Boot Stages
+
+CPU reset 後的起始取指／向量讀取規則由處理器與 SoC 決定，不是所有系統都直接在位址 0 執行第一條指令。
+
+```text
+常見分階段流程：
+Reset → Boot ROM → 片上 SRAM 中的 Bootloader → Firmware / OS
+```
+
+* Boot ROM 做最小初始化、選開機來源、載入下一階段，依安全政策驗證後轉移控制權。
+* 可更新的 Bootloader 可存於 Flash，載入 SRAM 後執行；它可以初始化 DRAM，再載入較大的程式。
+* 每階段準備下一階段所需資源；DRAM 在控制器初始化／訓練前通常不能直接使用。
+* 小型 MCU 可能直接從可取指的 Flash 執行，流程不必包含每個階段。
+* 映像損壞或來源不可用時，需定義備援、timeout 與 recovery 行為。
+
+### Before main: Establish the C Environment
+
+**Flash 是儲存程式與初始資料的媒介，不是自行發出命令的角色。CPU 執行 Bootloader／啟動程式中的指令，完成載入與初始化。**
+
+假設全域變數如下，映像存於 Flash，執行時資料放在 RAM，沒有其他 loader 代為初始化：
+
+```c
+int gain = 3;
+int count;
+```
+
+![進入 main 前的資料與堆疊準備](https://raw.githubusercontent.com/ray13542/soc_note/main/assets/unit02/startup_initialization.png)
+
+| 區域 | 典型內容 | 啟動時處理 |
+| --- | --- | --- |
+| .text | 機器指令 | 讓程式位於可執行位置 |
+| .rodata | 常數 | 讓常數位於可讀位置 |
+| .data | 有初始值的可寫靜態資料，例如 gain | 必要時從 Flash／ROM 複製初始值到 RAM 執行位置 |
+| .bss | 需零初始化的靜態資料，例如 count | 清為 0 |
+| stack | 函式呼叫所需空間 | 將 SP 設到配置且符合對齊規則的初始位置 |
+
+* `gain` 在 RAM 的內容必須初始化成 3。
+* 全域 `count` 雖未明寫初始值，C 語意要求它初始為 0；由此啟動環境建立該狀態。
+* 不可把此規則套用到所有未初始化的區域變數。
+* Linker 決定區域與位址，CPU 執行的啟動程式使用這些資訊完成準備，之後呼叫 main。
+* RAM 上電內容不可當作已正確初始化；.bss 通常不需在映像中逐 byte 儲存零值，但仍占執行時 RAM。
+* 若其他 loader 已完成某項初始化，分工可調整；仍須確保進入 main 前的條件成立。
+
+### Secure Boot & Trust
+
+下一階段可能來自可更新／替換的 Flash，執行前需依安全政策檢查授權與完整性。
+
+```text
+可信任的起點 → 驗證下一階段 → 通過才執行 → 繼續驗證後續階段
+```
+
+* 簽章檢查主要確認映像符合受信任金鑰所代表的授權政策，且簽署後的內容未被修改。
+* **簽章驗證不是掃毒，不保證沒有漏洞、惡意邏輯或功能 bug。** 經授權簽署的程式也可能有問題。
+* 簽章與加密是不同目的；只檢查檔案存在或自稱正版也不足以建立信任。
+* 信任起點的程式／金鑰資料需受到保護；驗證失敗的恢復流程也要設計。
+
+### Simulation: Fast Functional Tests vs Real Boot Tests
+
+RTL 模擬在晶片尚未製造時，計算硬體訊號行為，便於觀察與修正設計；通常比真實硬體慢。
+
+| 測試方式 | 用途與範圍 |
+| --- | --- |
+| 預載入 RAM / TCM | 測試程式與必要初始狀態先放好，縮短重複開機的模擬時間，集中檢查 UART／DMA 等功能 |
+| 完整開機 | 從 reset 與真正開機來源走過 Boot ROM、Flash controller、載入、驗證、初始化與控制轉移 |
+
+**預載入功能測試成功，不證明被跳過的開機路徑正確。** 另需驗證 .data 複製、.bss 清零、stack 設定，以及映像錯誤與 recovery 等情境。
+
+### Key Takeaways
+
+* CPU 執行啟動程式，Flash／ROM 保存其指令與資料；儲存媒介本身不主動指揮 CPU。
+* 每個開機階段先準備下一階段需要的資源。
+* 進 main 前確認資料初值、零初始化與 stack；不要假設 RAM 上電就是正確值。
+* Secure Boot 檢查授權與完整性，不保證程式沒有 bug 或病毒。
+* 預載入測功能與完整開機測試互補，證明範圍不同。
+* **關鍵字：Reset Vector、Boot ROM、Bootloader、.data、.bss、Stack Pointer、Chain of Trust、Backdoor Loading、Recovery。**
+
+### Source
+
+* [ChipVerify — Boot ROM and the Boot Flow](https://chipverify.com/soc-design/boot-rom-and-boot-flow)
+* gain / count 與圖解為自訂教學範例；實際 section 配置及啟動分工依工具鏈和系統。
