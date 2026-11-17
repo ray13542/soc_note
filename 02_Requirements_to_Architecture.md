@@ -4,6 +4,8 @@
 
 學習節奏：一次閱讀兩章，每章 2 題；訂正後更新 GitHub，在 HackMD 拉取閱讀。
 
+筆記整理方式：保留章節重點、例子、圖解與關鍵字；測驗及個人作答訂正留在聊天中。
+
 ## 1. The SoC Team and Flow
 
 ### Teams & Deliverables
@@ -69,10 +71,13 @@ DMA 硬體：DONE = 最後一筆資料已交給 UART FIFO
 * Tape-out：最終設計資料交付製造；後續硬體修改可能涉及重新製造。
 * Bring-up：拿到實際晶片後啟動、量測並檢查系統。
 
-### Quiz Review
+### Key Takeaways
 
-1. **方向正確，補足修正**：回答「Spec 沒有訂好」抓到語義不一致。應明確定義兩種完成狀態，並讓軟體等待 UART 實體傳送完成後再關閉，加入對應系統測試。
-2. **方向正確，補足風險**：提早修改有幫助；更關鍵的是避免等 freeze 後才發現系統、工具與實作問題，造成跨團隊重做、重新驗證及時程延誤。
+* SoC 開發依賴跨團隊交付；IP 各自正確不保證系統整合正確。
+* 介面語義、完成條件與錯誤行為必須一致。
+* 驗證、軟體與試跑實作提早介入，在修改成本較低時發現問題。
+* Freeze 是受控變更的基準，不是停止修正問題。
+* **關鍵字：Architecture、Integration、Verification、Implementation、Freeze、ECO、Tape-out、Bring-up。**
 
 ### Source
 
@@ -108,7 +113,7 @@ DMA 硬體：DONE = 最後一筆資料已交給 UART FIFO
 
 UART 8N1：1 start + 8 data + 1 stop = **10 bits / byte**。
 
-測驗範例：200 Bytes，最多 4 ms。
+計算範例：200 Bytes，最多 4 ms。
 
 ```text
 總位元數 = 200 × 10 = 2,000 bits
@@ -117,7 +122,7 @@ UART 8N1：1 start + 8 data + 1 stop = **10 bits / byte**。
              = 500,000 bit/s = 500 kbit/s
 ```
 
-反向檢查原答案 200 kbit/s：
+反向檢查：若選擇 200 kbit/s，所需時間為：
 
 ```text
 2,000 / 200,000 = 0.01 s = 10 ms → 超過 4 ms
@@ -137,10 +142,13 @@ UART 8N1：1 start + 8 data + 1 stop = **10 bits / byte**。
 
 Use Case → Requirement → 設計決定 → 驗證測試。資料量或期限變動時，可沿連結找到要重算的參數與要重跑的測試。
 
-### Quiz Review
+### Key Takeaways
 
-1. **分類正確，需求仍需具體化**：DMA 是 Design Choice；「在什麼 state、幾秒內完成」方向正確，但還要明定資料量、可觀察的起終點與數值。例如使用上面的 100 Bytes / 2 ms 需求。
-2. **計算修正，額外開銷觀念正確**：原答 200 kbit/s，正確是 **500 kbit/s**。必須先算 200 × 10 bits，再除以 0.004 s。剛好設定此速率不能保證包含啟動時間的總期限。
+* Use Case 描述情境；Requirement 定義可驗證結果；Design Choice 是達成結果的方法。
+* 需求要寫清楚條件、資料量、量測起終點、數值與單位。
+* 速率推導需包含協定開銷，並檢查 bits / Bytes 與時間單位。
+* 理想模型需預留餘裕，再以測試確認；同時執行的工作也要納入評估。
+* **關鍵字：Use Case、Requirement、Design Choice、Verification Method、Margin、Traceability。**
 
 ### Source
 
@@ -168,7 +176,7 @@ Use Case → Requirement → 設計決定 → 驗證測試。資料量或期限�
 
 ### Define DONE Precisely
 
-「完整把資訊傳入或取出」仍不夠明確：只讀完來源，可能尚未寫完目的地；只送出寫入資料，也可能還沒收到回應。
+完成條件需指定可觀察事件：只讀完來源，可能尚未寫完目的地；只送出寫入資料，也可能還沒收到回應。
 
 以下為**自訂 DMA 規格**，不是所有 DMA 的共同定義：
 
@@ -198,10 +206,13 @@ Use Case → Requirement → 設計決定 → 驗證測試。資料量或期限�
 * 來源定義與 generator 本身仍需 review / verification。
 * 修改要有版本紀錄與影響評估；自動產生不代表內容自動正確。
 
-### Quiz Review
+### Key Takeaways
 
-1. **方向正確，完成事件要再明確**：DMA 完成不能代表 UART 已送完。原答「完整傳入或取出」需改成精確的長度與完成事件，例如全部指定資料已寫入目的端且取得成功回應。Reset 後 DONE = 0 合理；錯誤時清除／不設 DONE 是一種可行規格，另需 ERROR 回報與舊狀態清除規則。
-2. **正確**：軟硬體 offset 不同造成錯誤存取；統一來源並自動產生相關輸出可降低風險，也要管理輸出版本與驗證 generator。
+* Architecture Spec 定義系統組成、介面與對外行為，供各團隊共同依循。
+* Register 定義要包含位址、欄位、權限、reset value、副作用與邊界行為。
+* DONE、BUSY、ERROR 必須有精確語義，不能只憑名稱推測。
+* 共同來源產生 RTL、C header、文件與驗證模型，並管理版本與產生工具的正確性。
+* **關鍵字：Architecture Spec、Memory Map、Register Map、Reset Value、Side Effect、Error Handling、Single Source。**
 
 ### Source
 
