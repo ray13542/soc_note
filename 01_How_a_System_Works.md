@@ -331,6 +331,141 @@ reg = reg | (1u << 3);
 
 ## 5. Polling, Interrupts and DMA
 
+### Who Waits? Who Moves Data?
+
+| 方式 | 如何知道要處理？ | 誰搬資料？ | 適合情境 |
+| --- | --- | --- | --- |
+| Polling | CPU 主動讀狀態 | 通常 CPU | 很短的等待、簡單初始化 |
+| Interrupt | 裝置提出 IRQ | 通常仍是 CPU | 按鍵等偶發事件 |
+| DMA | 依設定與裝置握手運作 | DMA engine | 大量或連續資料 |
+
+**Interrupt 是通知機制，DMA 是搬移機制，可以一起使用。**
+
+Polling 可以是連續忙等，也可以定期檢查；前者消耗 CPU 時間，後者的檢查間隔影響事件發現延遲。
+
+### Interrupt Flow
+
+```text
+裝置事件 → IRQ → CPU 執行 ISR → 處理中斷來源 → 返回原程式
+```
+
+* ISR = Interrupt Service Routine。
+* CPU 在事件之間可做其他工作或進入適當的低功耗狀態。
+* 進出 ISR、保存狀態都需時間；遮蔽與優先級也會影響回應時間。
+* 必須依裝置規格處理中斷來源，避免同一請求持續觸發。
+
+### DMA Engine
+
+![CPU 與 DMA 的分工](https://raw.githubusercontent.com/ray13542/soc_note/main/assets/unit01/dma_roles.png)
+
+CPU 通常設定 source、destination、length、control，再啟動 DMA。DMA 自己發起 bus transaction，完成或出錯後可用 interrupt 通知 CPU，也可由 CPU 輪詢其狀態。
+
+* DMA 常是 CPU 之外的 IP，也可整合在周邊或子系統中；不代表獨立晶片。
+* **DMA 不是 CPU 存取記憶體的必經關卡。CPU 仍能自己執行 load / store。**
+* CPU 與 DMA 可能競爭同一記憶體或互連資源，並行不代表完全沒有等待。
+* DMA 工作期間，buffer 的使用要遵守所有權與同步規則。
+* 若 CPU 有 Cache、DMA 不參與硬體一致性機制，還需確保雙方看到最新資料。
+* DMA 不會自動提高 UART 接腳的傳送速率。
+
+**DMA 將最後一筆資料交給 UART FIFO，不等於 UART 已把最後一個 bit 送出。** 真正送完要看裝置定義的傳送完成狀態。
+
+### Quiz Review
+
+1. **選擇正確**：偶發按鍵用 Interrupt，避免持續檢查；大量音訊用 DMA，減少 CPU 逐筆搬移。補充：兩者可結合，DMA 搬移完成後用 Interrupt 通知 CPU。
+2. **分工正確**：DMA 工作時 CPU 仍可存取其他允許的記憶體。DMA 完成送入 FIFO，不代表 UART 的序列傳送已完成。
+
+### Source
+
+* [ChipVerify — Polling, Interrupts and DMA](https://chipverify.com/soc-design/polling-interrupts-and-dma)
+* [Microchip — What is DMA?](https://onlinedocs.microchip.com/oxy/GUID-75C1A2B2-9CEC-425F-A886-10871EA17F75-en-US-1/GUID-2FE5A182-F3F5-46C0-8AD3-32184D642B38.html)
+
 ## 6. Memories in a System
+
+### Memory Types
+
+| 類型 | 斷電保留？ | 特性與用途 |
+| --- | --- | --- |
+| Register | 通常不保留 | 小量工作值、控制與狀態 |
+| SRAM | 不保留 | 不需 refresh；常用於片上 Cache、TCM、Buffer |
+| DRAM | 不保留 | 密度高、需 refresh；常作大容量主記憶體 |
+| Mask ROM | 保留 | 製造時固定內容，常用於初始開機程式 |
+| Flash | 保留 | 可重新編程，擦寫較慢且有壽命限制 |
+
+**SRAM 的 Static 不代表斷電保留，只代表供電正常時不需像 DRAM 一樣 refresh。**
+
+volatile memory（揮發性記憶體）與 C 的 `volatile` 關鍵字是不同概念。
+
+### SRAM, Data Memory, Cache, TCM
+
+這些名稱不是互斥的分類：
+
+| 名稱 | 描述什麼？ |
+| --- | --- |
+| Data memory | 用來存放資料的用途 |
+| SRAM / DRAM | 儲存技術 |
+| TCM | 與 CPU 緊密連接、具有明確位址配置的記憶體組織 |
+| Data Cache | 由硬體管理資料副本以加快存取的機制 |
+
+因此可以有「用 SRAM 實作的 DTCM，用來存放資料與 stack」。部分處理器區分 ITCM（指令）與 DTCM（資料），實際組織依設計。
+
+| | Cache | TCM |
+| --- | --- | --- |
+| 放什麼 | Cache controller 硬體自動管理副本與替換 | 軟體配置、初始化或執行時複製 |
+| 位址 | CPU 使用原資料位址，硬體判斷 hit / miss | 配置在 TCM 對應的位址區域 |
+| 時間特性 | 受 hit / miss 與下一層路徑影響 | 避免 cache miss，通常較容易界定延遲 |
+
+TCM 通常透過 CPU 專用介面存取。**TCM 不是唯讀記憶體，CPU 可以修改內容**，除非另設保護限制。DMA 能否存取它要看 SoC 互連與權限。
+
+### TCM：位置與內容是兩件事
+
+![TCM 配置、初始化與執行時修改](https://raw.githubusercontent.com/ray13542/soc_note/main/assets/unit01/tcm_lifecycle.png)
+
+自訂範例：`gain` 配置在 DTCM 的 `0x1000_0020`。
+
+1. **建置時**：程式配置與 linker 決定 gain 放在哪個位址。
+2. **開機時**：啟動程式依映像配置初始化，例如把初始值 3 複製到該處；其他區域可能清零。
+3. **執行時**：CPU 執行 `gain = gain + 1`，讀出 3、計算後寫回 4。
+
+**gain 的位置不變，但內容由 3 變 4。** 軟體管理也可以包含執行中的程式主動把資料複製進 TCM，不限於開機。
+
+### Predictability
+
+指的是**存取時間可預測**，不是資料值可預測。
+
+假設某控制工作必須在 100 cycles 內完成：平均很快、偶爾因 cache miss 等很久，仍可能錯過期限。若每次延遲固定或有可靠的最壞上限，較容易驗證是否準時。
+
+**TCM 不受 Cache 替換造成的 hit / miss 變動影響，但不保證任何系統下永遠固定一個 cycle。** 等待週期、仲裁與錯誤保護等仍需依規格分析。
+
+### Organization & Placement
+
+```text
+容量 = Depth × Width
+例：2,048 words × 32 bits = 65,536 bits = 8,192 Bytes = 8 KiB
+```
+
+* Depth：有幾個 word；Width：每個 word 幾個 bit。
+* Port：可用的存取介面；單埠 SRAM 通常每週期做一次讀或寫，更多 port 增加成本。
+* 大型片上儲存通常用 memory macro，不是全用一般 flip-flop 拼出來。
+* 選擇位置時看：斷電保留需求、容量、延遲、時間上限，以及哪些元件需要存取。
+* 固定初始開機碼可放 Mask ROM；可更新韌體可放 Flash；時間敏感資料可考慮 TCM；大量運行資料可考慮 DRAM。
+* **CPU 看得到，不保證 DMA 看得到。** 共用 buffer 必須放在兩者都能存取的區域。
+
+### Error Protection
+
+* Parity：偵測某些位元錯誤，一般不提供錯誤定位與修正。
+* ECC：加入檢查資訊，能力依編碼而異。
+* 常見 SECDED：修正單 bit 錯誤、偵測雙 bit 錯誤；需額外儲存與邏輯。
+
+### Quiz Review
+
+1. **可修改的判斷正確，配置觀念補充**：linker 配置決定「變數住在哪個位址」；CPU 寫入決定「該位址目前存什麼值」。TCM 的 gain 可以由 3 改為 4。
+2. **可預測性方向正確，措辭修正**：指存取時間。TCM 避免 cache miss，通常較容易保證時間上限，不是一概保證完全固定。Cache 副本由 **Cache controller 硬體**依策略填入、更新與替換。
+
+### Source
+
+* [ChipVerify — Memories in a System](https://chipverify.com/soc-design/memories-in-a-system)
+* [Microchip — Cache Memory vs TCM](https://onlinedocs.microchip.com/oxy/GUID-C88935CB-DA64-4DAF-944C-E314A1ACB890-en-US-1/GUID-45F2B8DB-0E69-447D-91BE-22866EAA9139.html)
+* [AMD — Tightly-coupled Memories](https://docs.amd.com/r/en-US/am011-versal-acap-trm/Tightly-coupled-Memories)
+* 圖片、gain 位址及容量計算為自訂教學範例。
 
 ## 7. Clocks and Resets in a System
