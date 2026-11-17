@@ -81,11 +81,132 @@ DMA 硬體：DONE = 最後一筆資料已交給 UART FIFO
 
 ## 2. From Use Cases to Requirements
 
-待學習。
+### Use Case → Requirement → Design Choice
+
+| 層次 | 回答什麼？ | 自訂例子 |
+| --- | --- | --- |
+| Use Case | 使用者要做什麼？ | 定期回傳感測資料，同時執行控制工作 |
+| Requirement | 必須達成什麼結果？ | 每批 100 Bytes 在指定起終點間不超過 2 ms |
+| Design Choice | 選什麼方法達成？ | DMA 搬移、UART 速率、buffer 配置 |
+
+**使用 DMA 是設計選擇，不保證資料一定準時送完。** 還要檢查終端速率、啟動成本、資源競爭與等待。
+
+### Testable Requirements
+
+「UART 要快」不能直接判定 pass / fail。需求應列出條件、資料量、起點、終點、上限與單位。
+
+自訂需求範例：
+
+> 正常工作模式下，UART 初始 idle，100 Bytes 已在來源 buffer 就緒且設定有效；從 DMA 接受 START 寫入的時脈邊緣，到 UART 最後一個 stop bit 傳送結束，時間不得超過 2 ms。
+
+* 量測起點要選明確事件，不能只說「開始」。若產品要求包括 CPU 發出指令前後的延遲，起點也要相應調整。
+* 記錄 ID、來源 Use Case、負責人、驗證方法與優先級。
+* 同時執行的工作也要納入條件，例如 UART 工作期間的 CPU 控制期限。
+* 功耗、容量與成本也可以是需求；電池壽命可轉換成含休眠與喚醒成本的平均能量預算。
+
+### Derive a Limit, Then Verify
+
+UART 8N1：1 start + 8 data + 1 stop = **10 bits / byte**。
+
+測驗範例：200 Bytes，最多 4 ms。
+
+```text
+總位元數 = 200 × 10 = 2,000 bits
+4 ms = 0.004 s
+理想最低速率 = 2,000 / 0.004
+             = 500,000 bit/s = 500 kbit/s
+```
+
+反向檢查原答案 200 kbit/s：
+
+```text
+2,000 / 200,000 = 0.01 s = 10 ms → 超過 4 ms
+```
+
+**剛好 500 kbit/s 時，線上傳送就用完 4 ms，沒有啟動與空檔的餘裕。**
+
+```text
+總時間 = 啟動／準備 + 接腳傳送 + 中途空檔
+```
+
+模型是預估，需保留合理餘裕並用測試確認，不能直接當作通過證據。
+
+### Traceability
+
+![需求追蹤與速率推導](https://raw.githubusercontent.com/ray13542/soc_note/main/assets/unit02/requirements_chain.png)
+
+Use Case → Requirement → 設計決定 → 驗證測試。資料量或期限變動時，可沿連結找到要重算的參數與要重跑的測試。
+
+### Quiz Review
+
+1. **分類正確，需求仍需具體化**：DMA 是 Design Choice；「在什麼 state、幾秒內完成」方向正確，但還要明定資料量、可觀察的起終點與數值。例如使用上面的 100 Bytes / 2 ms 需求。
+2. **計算修正，額外開銷觀念正確**：原答 200 kbit/s，正確是 **500 kbit/s**。必須先算 200 × 10 bits，再除以 0.004 s。剛好設定此速率不能保證包含啟動時間的總期限。
+
+### Source
+
+* [ChipVerify — From Use Cases to Requirements](https://chipverify.com/soc-design/from-use-cases-to-requirements)
+* 需求、計算與圖解均為本次自訂教學範例。
 
 ## 3. The System Architecture Spec
 
-待學習。
+### Purpose & Contents
+
+**Requirement 定義必須達成的結果；Architecture Spec 定義系統組成、連接與對外行為。**
+
+| 項目 | 定義內容 |
+| --- | --- |
+| Block / Interface | IP、版本、介面、連接 |
+| Memory Map | 各元件的位址範圍 |
+| Register Map | Offset、欄位、權限、reset value、副作用 |
+| Interrupt | 觸發、目的地、清除方式 |
+| Clock / Reset / Power | 時脈、啟動／關閉順序與模式 |
+| Performance | 指定條件下的 latency / bandwidth 等預算 |
+| Error handling | 非法存取、忙碌操作、傳送錯誤等行為 |
+| Debug / Test / Security | 系統需提供的檢查、測試與保護能力 |
+
+規格著重介面與行為；內部 FSM 如何編碼等細節通常留給 IP 設計文件，但會影響整合的容量與並行能力需定義清楚。
+
+### Define DONE Precisely
+
+「完整把資訊傳入或取出」仍不夠明確：只讀完來源，可能尚未寫完目的地；只送出寫入資料，也可能還沒收到回應。
+
+以下為**自訂 DMA 規格**，不是所有 DMA 的共同定義：
+
+| 項目 | 定義 |
+| --- | --- |
+| DONE 設為 1 | 指定長度的資料全部成功搬移，最後一筆目的端寫入已收到成功回應 |
+| 不代表什麼 | 不代表 UART 接腳最後一個 bit 已送出 |
+| Reset value | DONE = 0 |
+| 新 START | 接受新命令時清除上次 DONE |
+| 軟體清除 | 對 DONE 寫 1 清除（W1C） |
+| 搬移錯誤 | 設 ERROR，本次不設 DONE；停止發出後續資料請求，已發出請求依定義收尾 |
+| Interrupt | DONE 或 ERROR 且對應中斷已啟用時提出請求 |
+
+在這個定義下，DONE 表示「成功完成」，ERROR 表示「失敗」。另一種設計也可能讓 DONE 表示「作業已結束」，再由 ERROR 區分結果；兩種都需清楚寫進規格。
+
+其他要定義的邊界：忙碌時再次 START、Length = 0、非法位址、保留位元、reset 中的交易處理等。
+
+### One Source, Generated Outputs
+
+![由共同定義產生多種輸出](https://raw.githubusercontent.com/ray13542/soc_note/main/assets/unit02/spec_single_source.png)
+
+若 RTL 的 STATUS 改到 offset 0x08，C header 還是 0x04，軟體可能讀到其他 register 或非法位址，造成狀態誤判。
+
+**用同一份機器可讀描述，產生文件、RTL register block、C header 與驗證模型，降低手動多份維護的分歧。**
+
+* 產生後各輸出仍要使用相同版本。
+* 來源定義與 generator 本身仍需 review / verification。
+* 修改要有版本紀錄與影響評估；自動產生不代表內容自動正確。
+
+### Quiz Review
+
+1. **方向正確，完成事件要再明確**：DMA 完成不能代表 UART 已送完。原答「完整傳入或取出」需改成精確的長度與完成事件，例如全部指定資料已寫入目的端且取得成功回應。Reset 後 DONE = 0 合理；錯誤時清除／不設 DONE 是一種可行規格，另需 ERROR 回報與舊狀態清除規則。
+2. **正確**：軟硬體 offset 不同造成錯誤存取；統一來源並自動產生相關輸出可降低風險，也要管理輸出版本與驗證 generator。
+
+### Source
+
+* [ChipVerify — The System Architecture Spec](https://chipverify.com/soc-design/system-architecture-spec)
+* DONE、ERROR 與 START 行為為自訂教學規格，實際產品應依其文件。
 
 ## 4. Memory Maps and Address Decoding
 
