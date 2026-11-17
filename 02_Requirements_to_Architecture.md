@@ -1,11 +1,5 @@
 # From Requirements to Architecture
 
-> 第二單元：從產品需求到系統規格。一個單元一份筆記，依章節逐次補充。
-
-學習節奏：一次閱讀兩章，每章 2 題；訂正後更新 GitHub，在 HackMD 拉取閱讀。
-
-筆記整理方式：保留章節重點、例子、圖解與關鍵字；測驗及個人作答訂正留在聊天中。
-
 ## 1. The SoC Team and Flow
 
 ### Teams & Deliverables
