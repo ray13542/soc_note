@@ -469,3 +469,57 @@ TCM 通常透過 CPU 專用介面存取。**TCM 不是唯讀記憶體，CPU 可�
 * 圖片、gain 位址及容量計算為自訂教學範例。
 
 ## 7. Clocks and Resets in a System
+
+### Clock & Reset
+
+* Clock：決定暫存器何時取樣、更新狀態。
+* Reset：讓必要的控制狀態回到已知起點，不要求所有資料暫存器都 reset。
+* 例如未初始化的資料可以由 valid = 0 保護，保證寫入後才使用。
+* Clock 來源可經 PLL、分頻、clock gating 與 clock tree 分送至各區域。
+* 不同時脈需求形成不同 Clock Domain；跨域訊號需依兩端時序關係分析。
+
+### CDC — Clock Domain Crossing
+
+沒有可保證時序關係的訊號，可能在接收端的 setup / hold window 內變動，使 FF 進入 metastability。
+
+* 兩級同步器提供更多穩定時間，降低亞穩態傳播機率，不是保證風險為零。
+* 適合的單 bit 狀態可使用兩級同步器；短 pulse 仍可能漏接。
+* **多 bit 各自同步，不能保證資料一致性。** 各 bit 可能在不同拍被接收，拼出新舊混合值。
+* 多 bit 資料常用跨域 handshake（資料保持穩定直到協定允許更新）或 asynchronous FIFO。
+
+![跨域資料與安全解除 reset](https://raw.githubusercontent.com/ray13542/soc_note/main/assets/unit01/clock_reset.png)
+
+### Reset Sequence
+
+```text
+電源穩定 → 時脈可用 → 依依賴順序解除各區域 reset → CPU 開始取指令
+```
+
+對採非同步 reset 的電路，常見設計是 **asynchronous assertion、synchronous deassertion**。
+
+* Assertion：非同步進入 reset。
+* Deassertion：配合各 domain 的 clock 安全解除，滿足 recovery / removal 等時序要求。
+* 不安全的解除可能讓不同 FF 在不同拍恢復，或產生亞穩態，使 FSM 等控制狀態不一致。
+* 同步器之外，reset 的分配與實體時序仍需檢查。
+
+### Safe Reset Values
+
+| 狀態 | 初始值例子 | 原因 |
+| --- | --- | --- |
+| DMA_START | 0 | 軟體尚未設定來源、目的地與長度前不要啟動 |
+| FIFO_VALID | 0 | 不把未知或舊內容當有效資料 |
+| FSM_STATE | IDLE | 從已知流程開始 |
+
+若 DMA_START = 1，可能在未完成設定時發起交易，造成非預期讀寫、錯誤回應或資料破壞，實際結果依其他控制條件而定。
+
+部分 reset 還需考慮進行中的交易：只重置交易一方，另一方可能永遠等不到回應。需依架構排空、終止或以其他受控方式處理交易。
+
+### Quiz Review
+
+1. **完整正確**：8-bit 各自接兩級 FF 無法保證同一筆資料的一致性；使用適當 CDC handshake 或 async FIFO。
+2. **方向正確**：非同步解除可能造成各 FF 不同拍恢復。補充：須考慮 recovery / removal 與亞穩態；未設定就啟動 DMA，具體風險是非預期位址／長度的交易與資料破壞。
+
+### Source
+
+* [ChipVerify — Clocks and Resets in a System](https://chipverify.com/soc-design/clocks-and-resets-in-a-system)
+* 圖解與 DMA 初始值情境為教學整理；實際同步器、reset 順序與時序限制依系統規格。
