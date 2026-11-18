@@ -100,11 +100,125 @@ T3：收到有效 response，才使用回傳資料
 
 ## 3. Peripherals: UART, Timers and GPIO
 
-待學習。
+### Peripheral Integration
+
+MMIO、FIFO、interrupt 與 CDC 原理見[第一單元](01_How_a_System_Works.md)。這裡聚焦周邊的時間、外部接腳與軟體操作。
+
+| 周邊 | 工作 | 新的整合重點 |
+| --- | --- | --- |
+| UART | 串列通訊 | Baud rate、frame 格式、pin mux |
+| Timer | 計時與定時事件 | Counter / Compare、觸發與解除條件 |
+| GPIO | 讀取或控制 pin | Direction、SET / CLEAR、更新競爭 |
+
+### UART & Pin Mux
+
+```text
+CPU → TX FIFO → 傳送電路 → Pin mux → 外部 pin
+                  ↑
+             Baud-rate 設定
+```
+
+常見 8N1 frame 包含 1 個 start bit、8 個 data bits、無 parity、1 個 stop bit；每個 byte 佔 10 個 bit 時間。
+
+同一個 pin 可供不同功能使用，由 pin mux 選擇。自訂例子：UART 內部正常，但 pin mux 仍選 GPIO，外部就看不到預期的 UART 波形。
+
+### Timer: Counter vs Compare
+
+以一種簡化 timer 為例：每個 tick 增加 Counter，當 `Counter >= Compare` 時 interrupt 有效。**這是本例的規則，不代表所有 timer 都相同。**
+
+自訂例子：每 1 μs 加 1，Counter = 200、Compare = 260，則 60 μs 後條件成立。CPU 實際進入 handler 還可能有額外延遲。
+
+若 handler 執行時 Counter = 265，寫 Compare = 250 不會解除條件。應設定未來期限，讓 Compare 大於當時 Counter，且預留足夠時間避免寫入時期限已過。實際 interrupt 反映比較結果可能有延遲，依 IP 規格處理。
+
+其他 timer 可能倒數、自動重載或使用獨立狀態位元。也需注意 counter 溢位，不能把有限寬度計數器當成永遠遞增。
+
+### GPIO: Read-Modify-Write Race
+
+![GPIO 更新競爭與 SET 操作](https://raw.githubusercontent.com/ray13542/soc_note/main/assets/unit03/gpio_set_race.png)
+
+自訂例子：OUT 原本為 `0000`，主程式讀取後準備設 bit 0；中途 handler 把 bit 1 設成 1。主程式仍用舊值算出 `0001` 並寫回，會覆蓋 handler 的更新。
+
+若硬體提供 **write-one-to-set** 的 SET register，主程式對 SET 寫 `0001`，只會設定 bit 0，保留 bit 1，得到 `0011`。CLEAR 的對應設計則只清除寫入 1 的位元。
+
+這避免不同 bit 的 read-modify-write 競爭；多個執行流程操作同一個 bit 時，仍需協調。
+
+GPIO 輸入的同步與按鈕 debounce 是不同問題：同步器不會自動消除機械彈跳。
+
+### Key Takeaways
+
+* 周邊可讀寫，不代表外部 pin、時序或 interrupt 路徑正確。
+* Timer 要依實際條件解除 interrupt；寫入 Compare 不一定代表解除。
+* SET / CLEAR 可避免上述不同 bit 更新互相覆蓋。
+* **關鍵字：UART、8N1、Pin Mux、Counter、Compare、GPIO、Read-Modify-Write、Debounce。**
+
+### Source
+
+* [ChipVerify — Peripherals: UART, Timers and GPIO](https://chipverify.com/soc-design/peripherals-uart-timers-gpio)
+* Timer 數值、GPIO 操作案例與圖解為自訂教學整理。
 
 ## 4. Accelerators and Hardware/Software Partitioning
 
-待學習。
+### Partition the Work
+
+加速器執行特定運算；CPU 可負責參數、工作安排、啟動與錯誤處理。先量測時間花在哪裡，再決定哪些工作值得移至硬體。
+
+自訂影像濾波案例：
+
+| 工作 | 分配原因 |
+| --- | --- |
+| 大量像素的重複運算 → 硬體 | 可利用並行與 pipeline |
+| 決定濾波強度 → 軟體 | 策略可隨情境或版本調整 |
+| 設定 buffer、啟動與收尾 → 軟體 | 管理整體流程 |
+
+硬體可以提供參數 register，因此使用加速器不代表所有行為固定不變。
+
+### Amdahl's Law
+
+**局部加速比不等於整體加速比。** 假設原始時間中比例 p 的工作加速 S 倍，其他部分不變，且忽略額外成本：
+
+```text
+整體加速比 = 1 / ((1 - p) + p / S)
+```
+
+自訂例子：原本 100 ms，其中 CPU 控制 80 ms、運算 20 ms。運算快 10 倍後：
+
+```text
+新時間 = 80 + 20 / 10 = 82 ms
+整體加速比 = 100 / 82 ≈ 1.22 倍
+```
+
+即使運算瞬間完成，仍需 80 ms，最多快 1.25 倍。**未加速部分限制收益，並非抵消了已節省的時間。**
+
+### Setup Cost & Break-Even
+
+![加速器總時間與工作量](https://raw.githubusercontent.com/ray13542/soc_note/main/assets/unit03/accelerator_break_even.png)
+
+自訂模型（時間為 μs）：CPU = `3N`，加速器 = `24 + N`。24 已包含所有額外成本，假設工作不重疊。
+
+| 筆數 N | CPU | 加速器 | 比較 |
+| --- | --- | --- | --- |
+| 8 | 24 μs | 32 μs | CPU 較快 |
+| 12 | 36 μs | 36 μs | 相同 |
+| 20 | 60 μs | 44 μs | 加速器較快 |
+
+解 `24 + N < 3N` 得到 `N > 12`，整數筆數從 13 筆開始加速器較快。小工作可能無法攤平啟動與收尾成本。
+
+### Data Supply
+
+Bandwidth 原理見第一單元，此處只看加速器需求：自訂例子中每秒處理 1 億筆、每筆讀取 8 Bytes、無重用，需讀取頻寬 800 MB/s。只有 400 MB/s 可用時，輸入最多支撐每秒 5,000 萬筆；共用頻寬的輸出與其他流量還要另算。
+
+### Key Takeaways
+
+* 先量測瓶頸，再決定軟硬體分工。
+* 未加速部分限制整體加速比。
+* 比較完整任務時間，包含準備、資料搬移與收尾。
+* 計算能力需要足夠的資料供應才能發揮。
+* **關鍵字：Accelerator、HW/SW Partitioning、Profiling、Amdahl's Law、Overhead、Break-Even。**
+
+### Source
+
+* [ChipVerify — Accelerators and Hardware/Software Partitioning](https://chipverify.com/soc-design/accelerators-and-hw-sw-partitioning)
+* 分工、時間與頻寬數值案例、圖解為自訂教學整理。
 
 ## 5. Top-Level Integration and Connectivity Checks
 
