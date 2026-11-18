@@ -222,4 +222,68 @@ Bandwidth 原理見第一單元，此處只看加速器需求：自訂例子中�
 
 ## 5. Top-Level Integration and Connectivity Checks
 
-待學習。
+### Top-Level Scope
+
+Top-level 將 CPU、memory、interconnect 與周邊實例化並連接。除了資料路徑，也包含 clock、reset、interrupt、debug、電源控制與模式設定。
+
+CDC / reset 原理見[第一單元](01_How_a_System_Works.md)，address decoding 與單一來源生成見[第二單元](02_Requirements_to_Architecture.md)。這裡聚焦各種整合檢查的分工。
+
+### Legal Wiring vs Correct Wiring
+
+自訂例子：規格要求 UART IRQ → interrupt controller input 3，RTL 卻連到 input 4。兩者都是合法的 1-bit port，Lint 可能不報錯，但軟體依規格判斷時，會辨識成錯誤事件。
+
+**Lint 通過只代表沒有發現該組規則所檢查的問題，不代表 RTL 功能正確。** Connectivity check 則核對指定來源是否到達規格要求的目的地。
+
+![整合檢查的三個層次](https://raw.githubusercontent.com/ray13542/soc_note/main/assets/unit03/integration_checks.png)
+
+| 檢查 | 主要確認 | 例子 |
+| --- | --- | --- |
+| Lint | RTL 結構與可疑寫法 | 未接輸入、多重驅動、寬度問題 |
+| CDC / RDC | 跨 clock / reset domain 的處理 | 跨域路徑缺少適當保護 |
+| Connectivity | 連線符合指定關係 | UART IRQ 接到錯誤編號 |
+| Register / address test | 存取路徑與 register 行為 | 高 offset 無法到達、access type 錯誤 |
+| System test | 多個模組的完整互動 | CPU 操作 UART 並接收正確事件 |
+
+### Exercise the Real Path
+
+自訂 UART 系統測試路徑：
+
+```text
+CPU 執行 driver → interconnect → UART registers
+    → UART 外部波形 → 外部接收模型檢查
+    → UART 事件 → interrupt controller → CPU handler
+```
+
+直接驅動 UART 內部介面會繞過部分路徑，不能單靠這種測試證明 CPU 至周邊的整合正確。
+
+修正 IRQ 連線後，仍需確認 UART 在預期條件產生事件，以及 controller、CPU 和軟體能正確處理。**連接正確，不等於事件時機或整個流程正確。**
+
+Register 測試也要依語義建立預期：一般 RW 可依規格讀回；FIFO 可能 push / pop；W1C 寫 1 是清除。不能對所有 register 都要求「寫多少就讀回多少」。相關 side effect 原理沿用第一單元。
+
+### Generated Consistency vs Requirement Correctness
+
+自訂例子：需求要求 UART IRQ 接 input 3，但系統描述誤寫 input 4。若 RTL 與 connectivity checks 都由這份描述產生，兩者可能一致且檢查通過，卻仍不符合需求。
+
+**自動生成減少不同步，但不能保證來源描述本身正確。**
+
+修正流程：
+
+1. 對照系統需求，修正來源描述。
+2. 重新生成相關 RTL、檢查、軟體定義與文件。
+3. 重跑受影響的檢查與系統測試。
+4. 審查結果確實符合需求，避免只證明生成結果彼此一致。
+
+不要只修改生成後的 RTL，否則來源與結果分離，下一次生成也可能覆蓋修改。
+
+### Key Takeaways
+
+* 結構合法，不代表連接符合規格。
+* 連接正確，不代表整個使用流程正確。
+* 生成結果一致，不代表來源描述符合需求。
+* 修改來源後重新生成，並重跑相關檢查與需求導向的測試。
+* **關鍵字：Top-Level、Lint、CDC、RDC、Connectivity、System Test、Generator。**
+
+### Source
+
+* [ChipVerify — Top-Level Integration and Connectivity Checks](https://chipverify.com/soc-design/top-level-integration)
+* IRQ 編號、UART 測試路徑與生成來源錯誤案例、圖解為自訂教學整理。

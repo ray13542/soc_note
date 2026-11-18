@@ -6,7 +6,7 @@ SoC 中文學習筆記：依 ChipVerify 課程逐章理解、測驗與整理，�
 | --- | --- |
 | [01 — How a System Works](01_How_a_System_Works.md) | 7 章已整理，包含問答與圖解 |
 | [02 — From Requirements to Architecture](02_Requirements_to_Architecture.md) | 5 章已整理，含重點、關鍵字與圖解 |
-| [03 — Building with IP](03_Building_with_IP.md) | 4／5 章已整理，含重點、關鍵字與圖解 |
+| [03 — Building with IP](03_Building_with_IP.md) | 5 章已整理，含重點、關鍵字與圖解 |
 
 圖片存放在 assets/；筆記使用公開圖片網址，供 GitHub 與 HackMD 閱讀。
 
