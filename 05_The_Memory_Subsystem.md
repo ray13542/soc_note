@@ -116,8 +116,102 @@ Read X
 
 ## 3. Memory Bandwidth Budgets
 
-待學習。
+### Count at the Same Boundary
+
+Bandwidth budget 針對每個使用情境，將同時運作的 IP 所需 DRAM 流量加總，與可持續供應比較。基本 bandwidth 原理見[第一單元](01_How_a_System_Works.md)，QoS 與等待上限見[第四單元](04_Interconnect_and_Data_Movement.md)。
+
+本章計數位置是 DRAM 介面，不是所有 CPU / accelerator 內部存取。Cache hit 若沒有到 DRAM，就不計為一次 DRAM read。
+
+自訂例子：A 每秒寫入 200 MB 中間結果，B 再完整讀一次，合計 `200 + 200 = 400 MB/s`。若透過片上 buffer 直接交接，且不需 DRAM 副本，可省掉這部分 400 MB/s；不是省掉片上搬移本身。
+
+### Peak, Sustained and Margin
+
+![頻寬供應與餘裕](https://raw.githubusercontent.com/ray13542/soc_note/main/assets/unit05/bandwidth_budget.png)
+
+自訂例子：32-bit 介面、2,000 MT/s、假設有效率 75%。使用十進位單位：1 GB = 10^9 Bytes。
+
+```text
+Peak = 2,000 × 10^6 transfers/s × 4 Bytes/transfer = 8 GB/s
+Sustained estimate = 8 × 75% = 6 GB/s
+保留供應的 20% 餘裕：需求上限 = 6 × 80% = 4.8 GB/s
+```
+
+**MT/s 已表示每秒傳輸次數，不因 DDR 再乘 2。** 75% 是此例的估計值，應由實際流量與模型驗證，不是通用固定效率。
+
+若需求是 5 GB/s，雖未超過 6 GB/s，仍不符合 20% 餘裕目標。餘裕以 sustained supply 為分母：`(6 - 5) / 6 ≈ 16.7%`。
+
+### Check the Traffic Pattern
+
+Row conflicts、refresh、讀寫切換與排程會影響 sustained supply。平均需求通過後，還需檢查突發、最長等待及 buffer 能否支撐。
+
+需求過高時，可增加 channel / 介面能力，也可透過資料重用、壓縮或直接交接減少 DRAM 流量。降低一次 DRAM 往返通常同時減少傳輸能耗，但仍需評估新增片上資源成本。
+
+### Key Takeaways
+
+* 在相同邊界統計流量，寫入與讀回都要算，單位保留 Bytes/s。
+* 以實際流量的 sustained supply 比較，不只引用 peak。
+* 明確定義餘裕分母，並檢查平均值之外的突發與 deadline。
+* **關鍵字：Bandwidth Budget、Peak、Sustained、MT/s、Efficiency、Margin、Traffic Reduction。**
+
+### Source
+
+* [ChipVerify — Memory Bandwidth Budgets](https://chipverify.com/soc-design/memory-bandwidth-budgets)
+* 數值與流量案例、圖解為自訂教學整理。
 
 ## 4. On-Chip SRAM, Scratchpads and System Caches
 
-待學習。
+### Technology vs Role
+
+**SRAM 是儲存技術；TCM、scratchpad、cache 描述架構或管理方式，不是互斥的儲存技術。** Cache / TCM 基礎見第一單元，此處只補充關係與系統用途。
+
+| 名稱 | 強調什麼 | 常見用途 |
+| --- | --- | --- |
+| TCM | 與 CPU 緊密連接的存取路徑 | 關鍵程式、stack、即時資料 |
+| Scratchpad | 由軟體或明確搬移流程安排內容，不由 cache 自動替換 | 分塊輸入、輸出與中間結果 |
+| System cache | 硬體管理 hit、fill、replacement，服務接入的多個 IP | 減少 DRAM 流量與延遲 |
+
+TCM 通常可視為緊密連接 CPU 的 scratchpad 類記憶體。兩者都可能使用 SRAM；內容均可在執行時更新。DMA 依配置執行搬移，不代表 DMA 自動決定整個程式的資料配置。
+
+**DMA 能否存取 TCM，取決於對外入口、interconnect 路徑與權限。** 不能只憑名稱認定一定不能存取，也不能只憑 TCM / scratchpad 名稱保證固定一個 cycle；端口、仲裁與實作都會影響時間。
+
+### Scratchpad Reuse
+
+自訂例子：同一塊 16 KB 輸入被完整讀取 4 次。假設原本無 cache / buffer 重用，四次從 DRAM 讀需 64 KB；先搬到 scratchpad 再重用，輸入 DRAM read 可減為 16 KB。輸出及其他流量另算。
+
+軟體或控制流程要安排搬入、運算及空間重用，避免使用尚未搬完或已被覆寫的內容。
+
+### Double Buffering
+
+![雙緩衝重疊搬移與運算](https://raw.githubusercontent.com/ray13542/soc_note/main/assets/unit05/double_buffering.png)
+
+自訂例子：DMA 搬一塊需 8 μs，加速器算一塊需 12 μs。
+
+```text
+串行：每塊 8 + 12 = 20 μs
+雙緩衝：理想穩態每塊 max(8, 12) = 12 μs
+```
+
+假設 DMA 與加速器可同時使用所需資源，且忽略啟動、收尾與其他瓶頸。第一塊仍須先搬入再計算，不能把 12 μs 當成所有情況的單塊端到端延遲。
+
+A 被加速器使用時，DMA 可填 B；加速器切到 B 後，才可安全重填 A。**Double buffering 隱藏搬移時間，不會自動減少所搬的 bytes。**
+
+### System Cache and Interference
+
+System cache 可讓連接到它的多個 IP 利用自動資料重用，但哪些路徑經過它由 SoC 決定。
+
+自訂例子：CPU 反覆使用小工作集，GPU 大量串流資料只使用一次。若 GPU 不斷配置新 cache entries，可能擠掉 CPU 的有用內容。可用容量 / ways 分配，或對特定串流採取不配置新 entries 的策略，減少干擾。
+
+System cache 不代表整條 DMA 路徑自動 coherent；仍需確認與 CPU 私有 caches 之間的硬體連接與協定。片上 SRAM 也有面積、容量與功耗成本，不是越大一定越好。
+
+### Key Takeaways
+
+* TCM 強調 CPU 連接，scratchpad 強調明確內容管理，兩者可重疊。
+* 資料重用可減少 DRAM bytes；double buffering 則主要重疊時間。
+* 雙緩衝需遵守 ownership，不能覆寫仍在使用的 buffer。
+* System cache 效果依 locality 與共享競爭而定，不自動保證 coherence。
+* **關鍵字：SRAM、TCM、Scratchpad、Reuse、Double Buffering、System Cache、Partitioning。**
+
+### Source
+
+* [ChipVerify — On-Chip SRAM, Scratchpads and System Caches](https://chipverify.com/soc-design/sram-scratchpads-and-system-caches)
+* TCM / scratchpad 分類說明、雙緩衝數值及圖解為自訂教學整理。
