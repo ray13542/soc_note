@@ -227,4 +227,74 @@ UPF（Unified Power Format）用來描述 power intent，如 power domain、供�
 
 ## 4. Dynamic Voltage and Frequency Scaling
 
-待學習。
+### Voltage, Frequency and OPP
+
+DVFS 在運作中依需求調整電壓與頻率。一般正常工作範圍內，降低電壓會讓邏輯傳播變慢；提高頻率則縮短每個 cycle 的可用時間。因此低電壓搭配過高頻率可能造成 setup timing violation。
+
+OPP（Operating Performance Point）是經驗證可使用的工作點；不能任意組合電壓與頻率。驗證需涵蓋要求的製程、溫度與供電條件。
+
+以下為自訂教學數值，不代表特定晶片：
+
+| OPP | 電壓 | 頻率 |
+| --- | --- | --- |
+| Low | 0.8 V | 500 MHz |
+| High | 1.0 V | 1 GHz |
+
+### Safe Transition Order
+
+![DVFS 的升降順序](https://raw.githubusercontent.com/ray13542/soc_note/main/assets/unit07/dvfs_transition.png)
+
+* Low → High：先升壓，確認電壓已穩定，再安全升頻。
+* High → Low：先降頻，確認頻率已降低，再降壓。
+* 避免進入「電壓不足以支撐目前頻率」的中間狀態。
+
+寫完控制 register 只代表送出設定，不代表 regulator 已穩定或 PLL 已 lock。控制流程需依硬體規格等待完成；clock 切換也必須避免 glitch。是否需使用暫時 clock 或暫停部分交易，依架構決定，不必然需要 reset 整個區塊。
+
+### Power vs Energy
+
+功率 P 是每秒消耗能量的速率，單位 W；能量 E 是整段工作累積的消耗，單位 J。動態功率常用近似式：
+
+```text
+P_dynamic ≈ α × C × V² × f
+E = P × t   （此式假設區間內功率固定）
+```
+
+α 是活動程度，C 是有效切換電容。此模型不包含漏電與完整 SoC 功耗。
+
+自訂案例：同一件 compute-bound 工作在 High 需 4 ms、Low 需 8 ms。假設 α、C 不變，忽略漏電與切換成本：
+
+```text
+P_Low / P_High = (0.8 / 1.0)² × (500 / 1000) = 32%
+E_Low / E_High = 32% × (8 / 4) = 64%
+```
+
+因此 Low 的動態功率是 High 的 32%，完成工作的動態能量則是 64%。若只降頻而電壓不變，在相同工作 cycle 數與活動程度的模型下，功率降低、時間變長，動態能量大致不變。
+
+### Deadline and Workload Bottlenecks
+
+若上述工作要求 5 ms 內完成，Low 的 8 ms 不符合期限，即使能量較低也不能選。Compute-bound 工作通常較能受益於升頻；memory-bound 工作若主要等待 DRAM，CPU 頻率加倍不保證效能加倍。
+
+低壓慢慢做，與高速完成再睡眠（race to idle / sleep），哪個較省取決於完整能量：活動期間功耗、執行時間、睡眠功耗與切換成本。不能只比較工作期間的功率；sleep 的 break-even 與喚醒期限見前一章。
+
+### System Coordination
+
+軟體或硬體策略依負載、期限與溫度選 OPP，再由控制機制完成安全切換。
+
+* 共用 voltage rail：降壓前必須符合所有相關使用者的需求，不能只看其中一個 core。
+* 時間基準：CPU cycle 與實際時間的關係會改變；timer / timeout 基礎見[第六單元](06_Interrupts_Timers_and_Multicore.md)。若周邊 clock 也受影響，需確認 baud rate 等設定。
+* 切換成本：過度頻繁調整可能浪費時間與能量，策略需避免不必要的震盪。
+
+### Key Takeaways
+
+* OPP 是經驗證的工作點；升速先升壓，降壓先降速，並確認各步完成。
+* 功率降低不等於完成工作的能量等比例降低。
+* 工作期限、瓶頸、共享供電與切換成本共同決定合適的 OPP。
+* **關鍵字：DVFS、OPP、Voltage Regulator、PLL Lock、Dynamic Power、Energy、Deadline、Memory-Bound、Race to Idle。**
+
+### Sources
+
+* [ChipVerify — Dynamic Voltage and Frequency Scaling](https://chipverify.com/soc-design/dvfs)
+* [Linux — Operating Performance Points](https://cdn.kernel.org/doc/html/latest/power/opp.html)
+* [Linux — CPU Performance Scaling](https://kernel.org/doc/html/v6.14/admin-guide/pm/cpufreq.html)
+* [TI — Power Management](https://software-dl.ti.com/processor-sdk-linux/esd/docs/latest/linux/Foundational_Components/Kernel/Kernel_Drivers/Power_Management.html)
+* OPP 數值、計算與流程圖為自訂教學示例。
