@@ -119,11 +119,111 @@ set_bus_skew 1.5 -from $gray_q -to $sync1_d
 
 ## 2. Reset Architecture and Reset Domain Crossings
 
-待學習。
+### Reset Scope and Dependencies
+
+Reset assert / release 基礎見[第一單元](01_How_a_System_Works.md)。本章聚焦局部 reset 與跨區塊影響。
+
+Reset domain 是一起被同一 reset 控制的暫存器集合，與 clock domain 不必一一對應。規格需定義每種 reset 的作用範圍、保留狀態與解除依賴。例如 watchdog reset 後仍須讀取原因，reset-cause register 就必須能保留該次原因；debug reset 也可能保留 debug 連線。
+
+### Same Clock Can Still Have RDC
+
+自訂例子：A、B 使用相同 clock，A 可以獨立 asynchronous reset，B 持續運作。A 的 valid 直接送到 B。
+
+* 電氣／時序風險：A assert reset 時，valid 可在任意時間變化。若接近 B 的取樣邊緣，B 可能 metastable 或取到不預期的值。
+* 功能／協定風險：A 清掉工作記錄，但 B 還在等回覆，或仍會送回舊工作的 response。
+
+**同步解除 A 的 reset，不能消除 assert reset 對 B 的影響。** 只等交易完成也不自動證明所有 crossing 安全；還需依訊號語義安排隔離、同步、握手或協調 reset 範圍，並檢查 RDC。
+
+### Quiesce Before Local Reset
+
+![局部 reset 與關電的安全邊界](https://raw.githubusercontent.com/ray13542/soc_note/main/assets/unit07/reset_power_sequence.png)
+
+可控制的局部 reset：停止新工作 → 等待在途交易結束 → 確認 quiescent → 啟用適當邊界保護 → reset → 等 clock 與相依資源就緒 → 同步解除並初始化 → 重新開放服務。
+
+Quiescent 表示已無尚未交代完的工作；不能只看 IP 不再發出新 request。DMA 的寫入尚未收到 B response，就仍可能有在途交易。
+
+若硬體已卡死，不能無限等待 drain。可設 timeout / watchdog 觸發預定恢復流程，但**重啟的範圍與協定處置必須完整**：例如由支援的 bus recovery 機制完成錯誤處置，或協調重置相關區塊。若只 reset DMA，而互連仍保留舊交易，問題可能依舊存在。不能任意憑空取消 AXI 交易或把所有輸出壓 0 就當作完成。
+
+### Reset Data vs Control State
+
+FIFO 可透過 pointer、empty、valid 的初始化，避免舊 storage 內容被當作有效資料，不一定要 reset 每一個資料 bit。這要求所有使用路徑都遵守有效性規則。機密資料的安全清除是另一項需求，不能用 empty 取代。
+
+### Key Takeaways
+
+* 同 clock 不代表沒有 RDC；asynchronous reset assertion 也可能引入非同步變化。
+* 局部 reset 同時涉及 crossing 安全與 transaction 生命週期。
+* Watchdog 是恢復觸發來源；系統仍須定義能收拾在途工作的恢復範圍。
+* **關鍵字：Reset Domain、RDC、Quiescent、Drain、Isolation、Reset Cause、Recovery。**
+
+### Source
+
+* [ChipVerify — Reset Architecture and Reset Domain Crossings](https://chipverify.com/soc-design/reset-architecture-and-rdc)
+* A / B、DMA 與恢復情境為自訂教學分析。
 
 ## 3. Power Domains and Power Management
 
-待學習。
+### Clock Gating vs Power Gating
+
+Clock gating 的 glitch 防護見本單元第 1 章。Power domain 是依電源架構一起管理供電的一群電路。
+
+| 機制 | 供電與狀態 | 主要目的 |
+| --- | --- | --- |
+| Clock gating | 電源仍在，暫存器通常保留狀態 | 降低相關切換功耗 |
+| Power gating | 關閉主要供電，未保留狀態會遺失 | 降低被關閉區塊的漏電等功耗 |
+
+### Isolation, Retention and Level Shifting
+
+| 機制 | 解決的問題 | 自訂例子 |
+| --- | --- | --- |
+| Isolation | 來源關電後，輸出不再可靠 | 將 accelerator 的 irq 固定為不觸發狀態 |
+| Retention | 關電期間仍需保留部分狀態 | 使用保留供電保存設定暫存器 |
+| Level shifter | 兩側訊號電壓不同 | 轉換不同電壓 domain 的訊號電位 |
+
+Isolation 的安全值依介面決定，不一定是 0；其控制與供電須在需要保護時仍有效。Retention 需要保留供電，並非所有電源消失後仍能保存。Level shifter 不自動取代 isolation，除非使用具備兩者功能的元件。
+
+### Safe Power Transition
+
+關電前先停止新工作，完成在途交易與資料交接，保存必要狀態，並在輸出失效前建立 isolation。恢復後，必須先使供電、clock、reset 與狀態恢復符合規格，待輸出有效後再解除 isolation、開放服務。
+
+上圖表示依賴關係，不是通用逐拍控制表。Retention save / restore、reset 與 clock 的精確順序依 IP 與 cell 規格決定；避免 reset 意外清掉剛還原的狀態。
+
+CPU 存取已關電的區塊時，系統需定義阻擋、錯誤回應或先喚醒再服務，不能讓 request 永遠無回覆。喚醒所需的 timer、事件偵測與 power controller 路徑必須在該低功耗狀態下仍有電；always-on 不代表每個 clock 都持續切換。
+
+### Break-Even Time and Wake-Up Deadline
+
+自訂簡化模型：忽略切換時間，額外進出能量合計為固定成本。
+
+```text
+Clock-gated idle：12 mW
+Power-gated sleep：2 mW
+額外切換能量：100 μJ
+
+Break-even time = 100 μJ / (12 − 2) mW = 10 ms
+```
+
+| Idle 時間 | 維持 idle 能量 | Sleep 能量（含切換成本） | 結論 |
+| --- | --- | --- | --- |
+| 5 ms | 60 μJ | 10 + 100 = 110 μJ | 維持 idle 較省 |
+| 100 ms | 1200 μJ | 200 + 100 = 300 μJ | 此模型下 sleep 較省 |
+
+即使能量划算，若 wake-up 需 500 μs，但事件後 100 μs 內必須開始工作，仍不能選此 sleep state。實際選擇需同時計入切換時間／能量、預期 idle 時間、喚醒期限與保留資源。
+
+### Power Intent and Verification
+
+UPF（Unified Power Format）用來描述 power intent，如 power domain、供電、isolation 與 retention。驗證需涵蓋關電時狀態失效、隔離與還原行為；不能只依賴所有區塊持續有電的 RTL 模擬。
+
+### Key Takeaways
+
+* Isolation 保護邊界；retention 保存狀態；level shifter 處理電壓差異。
+* 失效前建立隔離，有效後才解除隔離；喚醒路徑必須保有必要供電。
+* 更深的 sleep 不一定更省，也不一定符合回應期限。
+* **關鍵字：Power Domain、Power Gating、Isolation、Retention、Level Shifter、Always-On、Break-Even Time、UPF。**
+
+### Sources
+
+* [ChipVerify — Power Domains and Power Management](https://chipverify.com/soc-design/power-domains-and-power-management)
+* [Arm — Power Control System Architecture](https://documentation-service.arm.com/static/63f3499c9567172d4e2aadd6)
+* 能量計算與流程圖為自訂教學模型。
 
 ## 4. Dynamic Voltage and Frequency Scaling
 
