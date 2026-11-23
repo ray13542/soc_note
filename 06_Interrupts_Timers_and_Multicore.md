@@ -113,4 +113,46 @@ Window mode 不取代進展檢查；這些機制也不保證偵測所有故障�
 
 ## 3. Multicore Integration and Coherent Interconnects
 
-待學習。
+### Coherence Scope
+
+Cache 與 DMA 維護基礎見[第四單元](04_Interconnect_and_Data_Movement.md)。多核心可各自快取同一個位址；coherence 協調這些副本的讀取、失效與寫入權限。必須確認哪些 master、位址區域和實際路徑參與一致性，不能只看 SoC 宣稱支援 coherent。
+
+| 類型 | 重點 |
+| --- | --- |
+| Non-coherent | 軟體依平台規則處理 cache 可見性 |
+| I/O coherent | I/O master 的交易可與 CPU cache 協調；常見 DMA 本身沒有參與 snoop 的 cache |
+| Fully coherent | 裝置自己的 cache 也參與一致性協定與 snoop |
+
+### I/O Coherent DMA Example
+
+![I/O coherent DMA 的資料來源與所有權](https://raw.githubusercontent.com/ray13542/soc_note/main/assets/unit06/io_coherent.png)
+
+自訂 TX 例子：CPU 把 X 改成 99，dirty cache line 裡是 99，DRAM 還是 10。DMA 經正確配置的 coherent 路徑讀 X，互連可透過 snoop 與 cache hierarchy 取得最新值。實際資料可能來自 cache，或依協定完成 writeback 後取得；**不必一律先寫回 DRAM 才能交給 DMA。**
+
+RX 方向：DMA 寫入 77，硬體依一致性協定處理 CPU 的舊副本，避免 CPU 繼續使用失效資料。CPU 仍需確認 DMA completion、必要的 ordering，以及 buffer 所有權交接；coherence 不允許 CPU 隨意改寫 DMA 正在使用的 buffer。平台 DMA API 的規則仍需遵守。
+
+### Coherence Is Not Atomicity
+
+兩個 core 對 counter 執行一般的 read → add → write，都可能讀到 0，最後各寫入 1。即使 cache 完全 coherent，仍可能遺失一次更新。
+
+需要 atomic read-modify-write 或適當的 lock。跨不同位址的先後順序也需要符合 memory model 的同步方式；coherence 不等於所有程式操作自動按預期排序。
+
+### Shared Memory and Mailbox
+
+大量資料放 shared memory；mailbox 傳遞 buffer 位址、長度或工作 ID 等通知。送通知前必須讓資料可見並滿足 ordering；接收端依交接協定讀取。Mailbox 本身不會自動完成 cache maintenance。
+
+核心關閉前，需要安全保存或轉移唯一的 dirty 資料，並依協定退出一致性系統。是否由軟體 clean、硬體處理或保留 cache，取決於架構。
+
+### Key Takeaways
+
+* Coherence 管理資料副本；atomic / lock 保護不可分割的更新。
+* I/O coherent 不代表所有 DMA 路徑皆 coherent，也不代表可以省略 completion 與所有權交接。
+* 最新資料可以存在 cache；DRAM 不一定隨時是最新版。
+* **關鍵字：Coherence、Snoop、Dirty Line、I/O Coherent、Atomic、Mailbox、Ownership。**
+
+### Sources
+
+* [ChipVerify — Multicore Integration](https://chipverify.com/soc-design/multicore-integration)
+* [Arm — SMMU guide](https://documentation-service.arm.com/static/64f59fb3bc48b0381ce07226)
+* [Arm — AMBA CHI specification](https://documentation-service.arm.com/static/671f9624d037e313ed5aad20)
+* 數值案例與圖解為自訂教學整理。
